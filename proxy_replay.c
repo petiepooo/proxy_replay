@@ -25,12 +25,20 @@
 #define MAX_PATH_LEN 1024
 #define MAX_FILTER_LEN 1024
 
+
+#define TH_FIN 0x01
+#define TH_SYN 0x02
+#define TH_RST 0x04
+#define TH_PUSH 0x08
+#define TH_ACK 0x10
+
 struct ipv4_tuple {
     uint32_t src_ipv4;
     uint32_t dst_ipv4;
     uint16_t src_port;
     uint16_t dst_port;
 };
+
 struct ipv4_maps {
     struct ipv4_tuple original_tuple;
     struct ipv4_tuple proxy_tuple;
@@ -45,6 +53,7 @@ struct options {
     char read_iface[MAX_IFACE_LEN];
     char write_iface[MAX_IFACE_LEN];
     char filter[MAX_FILTER_LEN];
+    int debug;
 };
 struct options opts;
 
@@ -53,7 +62,7 @@ void read_options(int argc, char* argv[])
     int opt;
 
     // put ':' at the starting of the string so compiler can distinguish between '?' and ':'
-    while((opt = getopt(argc, argv, ":r:w:i:o:h")) != -1)
+    while((opt = getopt(argc, argv, ":r:w:i:o:hd")) != -1)
     {
         switch(opt)
         {
@@ -81,6 +90,10 @@ void read_options(int argc, char* argv[])
             printf("todo: display help\n");
             exit(0);
 
+        case 'd':  /* debug mode */
+            opts.debug = 1;
+            break;
+
         case ':':  /* no value supplied */
             fprintf(stderr, "option %c requires a value\n", optopt);
             exit(-1);
@@ -99,20 +112,24 @@ void read_options(int argc, char* argv[])
         fprintf(stderr, "Cannot read from both file and interface\n");
         assert(0);
     }
-    if(strlen(opts.write_file) > 0 && strlen(opts.write_iface) > 0)
+    if(strlen(opts.write_file) == 0 && strlen(opts.write_iface) == 0)
+        opts.debug = 1;
+    else if(strlen(opts.write_file) > 0 && strlen(opts.write_iface) > 0)
     {
         fprintf(stderr, "Cannot write to both file and interface\n");
         assert(0);
     }
 
-    if(optind < argc)
+    if(opts.debug)
     {
-        fprintf(stderr, "bpf filter: ");
-        for(; optind < argc; optind++)
+        fprintf(stderr, "debug mode enabled\n");
+        if(optind < argc)
         {
-            fprintf(stderr, "%s ", argv[optind]);
-        }
+            fprintf(stderr, "bpf filter: ");
+            for(; optind < argc; optind++)
+                fprintf(stderr, "%s ", argv[optind]);
         fprintf(stderr, "\n");
+        }
     }
 }
 
@@ -129,6 +146,45 @@ void update_and_replay_pkt(pkt, map, pkt_dst)
     /* replay_packet(pkt) */
 }
 
+void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
+{
+    uint32_t src_ipv4 = 0;
+    uint32_t dst_ipv4 = 0;
+    uint16_t src_port = 0;
+    uint16_t dst_port = 0;
+
+    memset(tuple, 0, sizeof(struct ipv4_tuple));
+    /* extract IPs and ports */
+
+    if(src_ipv4 < dst_ipv4)
+    {
+        tuple->src_ipv4 = src_ipv4;
+        tuple->dst_ipv4 = dst_ipv4;
+    }
+    else
+    {
+        tuple->src_ipv4 = dst_ipv4;
+        tuple->dst_ipv4 = src_ipv4;
+    }
+    if(src_port < dst_port)
+    {
+        tuple->src_port = src_port;
+        tuple->dst_port = dst_port;
+    }
+    else
+    {
+        tuple->src_port = dst_port;
+        tuple->dst_port = src_port;
+    }
+}
+
+u_char extract_flags_if_tcp(const u_char* pkt)
+{
+    /* if not tcp */
+        return 0;
+    /* return tcp flag field */
+}
+
 int main(int argc, char* argv[], char* env[])
 {
     uint64_t packet_count = 0;
@@ -138,32 +194,37 @@ int main(int argc, char* argv[], char* env[])
     struct bpf_program fp;
     const u_char* packet;
     int rc;
+    u_char tcp_flags;
+    struct ipv4_tuple hashable_tuple;
 
     read_options(argc, argv);
 
     if(strlen(opts.read_iface) > 0)
-        in_handle = pcap_open_live(opts.read_iface, 0, 1, 2000, errbuf);
+        in_handle = pcap_open_live(opts.read_iface, 0, 1, 100, errbuf);
     else
         in_handle = pcap_open_offline(opts.read_file, errbuf);
     assert(in_handle != NULL);
 
     /* open pkt_dst */
 
-    while((rc = pcap_next_ex(in_handle, &pheader, &packet)) == 1)
+    while((rc = pcap_next_ex(in_handle, &pheader, &packet)) == 1 || rc == 0)
     {
+        if(rc == 0)
+            continue;
         assert(rc);
         ++packet_count;
-        fprintf(stderr, "Jacked a packet with length of [%d]\n", pheader->len);
+        if(opts.debug)
+            fprintf(stderr, "Jacked a packet with length of [%d]\n", pheader->len);
 
-        /* hashable_tuple = hash_pkt_tuple(packet); */
-        /* tcp_flags = extract_flags_if_tcp(packet); */
+        hash_pkt_tuple(packet, &hashable_tuple);
+        tcp_flags = extract_flags_if_tcp(packet);
 
         /* if (map = lookup_map(hashable_tuple)) == NULL */
         {
-            /* if(not is_tcp(packet)) || RST not in pkt.flags */
+            if(tcp_flags == 0 || (tcp_flags & TH_RST) == 0)
             {
                 /* map = create_map(hashable_tuple, packet) */
-                /* if(is_tcp(packet) and SYN not in pkt.flags */
+                if(tcp_flags && (tcp_flags & TH_SYN) == 0)
                 {
                     /* map.flags.discard = 1 */
                     /* log(partial) */
@@ -178,22 +239,16 @@ int main(int argc, char* argv[], char* env[])
             /* if(map.flags.discard) */
                 /* continue; */
 
-            /* if(is_tcp(packet)) */
-            {
-                /* if SYN in src.flags */
-                    /* map.flags.srcsyn = 1; */
-                /* if SYN in dst.flags */
-                    /* map.flags.dstsyn = 1; */
-            }
-
             /* if(not map.proxy && pkt.payload_len > 0) */
             {
-                /* if(not is_tcp(packet) || map.flags.srcsyn && map.flags.dstsyn) */
+                if(tcp_flags || (tcp_flags & TH_SYN) == TH_SYN)
+                {
                     /* populate_proxy(pkt, map) */
-                /* else */
+                }
+                /* else */ /* TODO: handle UDP? */
                 {
                     /* map.flags.discard = 1 */
-                    /* log(partial) */
+                    /* log(partial stream) */
                 }
             }
 
@@ -208,16 +263,10 @@ int main(int argc, char* argv[], char* env[])
 
             /* if is_tcp(packet) && RST in pkt.flags || map.flags.srcfin && map.flags.dstfin */
                 /* rm_map(hashable_tuple) */
-            /* else */
-            {
-                /* if FIN in src.flags */
-                    /* map.flags.srcfin = 1; */
-                /* if FIN in dst.flags */
-                    /* map.flags.dstfin = 1; */
-            }
         }
         /* else */
             /* log_weird(pkt) */
+
     if(packet_count % 10 == 0)
         /* check another entry for expiry */
         break; /* TODO: remove when done debugging */
@@ -226,6 +275,7 @@ int main(int argc, char* argv[], char* env[])
     pcap_close(in_handle);
     /* close(pkg_dst); */
 
-    fprintf(stderr, "Jacked a total of %llu packets\n", packet_count);
+    if(opts.debug)
+        fprintf(stderr, "Jacked a total of %llu packets\n", packet_count);
     return 0;
 }
