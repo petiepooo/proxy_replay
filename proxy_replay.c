@@ -82,12 +82,12 @@ void read_options(int argc, char* argv[])
             exit(0);
 
         case ':':  /* no value supplied */
-            printf("option %c requires a value\n", optopt);
+            fprintf(stderr, "option %c requires a value\n", optopt);
             exit(-1);
 
         case '?':  /* unknown option */
         default:
-            printf("option %c not recognized\n", optopt);
+            fprintf(stderr, "option %c not recognized\n", optopt);
             exit(-1);
         }
     }
@@ -96,23 +96,23 @@ void read_options(int argc, char* argv[])
         strncpy(opts.read_iface, "en0", MAX_IFACE_LEN);
     else if(strlen(opts.read_file) > 0 && strlen(opts.read_iface) > 0)
     {
-        printf("Cannot read from both file and interface\n");
+        fprintf(stderr, "Cannot read from both file and interface\n");
         assert(0);
     }
     if(strlen(opts.write_file) > 0 && strlen(opts.write_iface) > 0)
     {
-        printf("Cannot write to both file and interface\n");
+        fprintf(stderr, "Cannot write to both file and interface\n");
         assert(0);
     }
 
     if(optind < argc)
     {
-        printf("bpf filter: ");
+        fprintf(stderr, "bpf filter: ");
         for(; optind < argc; optind++)
         {
-            printf("%s ", argv[optind]);
+            fprintf(stderr, "%s ", argv[optind]);
         }
-        printf("\n");
+        fprintf(stderr, "\n");
     }
 }
 
@@ -153,39 +153,61 @@ int main(int argc, char* argv[], char* env[])
     {
         assert(rc);
         ++packet_count;
-        printf("Jacked a packet with length of [%d]\n", pheader->len);
-        /* tuple_hash = hash_pkt_tuple(packet); */
-        /* if (map = lookup_map(tuple_hash)) == NULL */
+        fprintf(stderr, "Jacked a packet with length of [%d]\n", pheader->len);
+
+        /* hashable_tuple = hash_pkt_tuple(packet); */
+        /* tcp_flags = extract_flags_if_tcp(packet); */
+
+        /* if (map = lookup_map(hashable_tuple)) == NULL */
         {
-            /* if RST in pkt.flags or ACK == pkt.flags */
-                /* log_weird(pkt) */
-            /* else */
-                /* create_map(pkt) */
+            /* if(not is_tcp(packet)) || RST not in pkt.flags */
+            {
+                /* map = create_map(hashable_tuple, packet) */
+                /* if(is_tcp(packet) and SYN not in pkt.flags */
+                {
+                    /* map.flags.discard = 1 */
+                    /* log(partial) */
+                }
+            }
         }
 
-        /* not a simple else clause as map may have been created above */
-        /* if (map = lookup_map(tuple_hash)) != NULL */
+        /* if map != NULL */
         {
-            /* if SYN in src.flags */
-                /* map.flags.srcsyn = 1; */
-            /* if SYN in dst.flags */
-                /* map.flags.dstsyn = 1; */
+            /* update_map_ts(); */
 
-            /* if not map.proxy && pkt.payload_len > 0 */
-                /* populate_proxy(pkt, map) */
+            /* if(map.flags.discard) */
+                /* continue; */
+
+            /* if(is_tcp(packet)) */
+            {
+                /* if SYN in src.flags */
+                    /* map.flags.srcsyn = 1; */
+                /* if SYN in dst.flags */
+                    /* map.flags.dstsyn = 1; */
+            }
+
+            /* if(not map.proxy && pkt.payload_len > 0) */
+            {
+                /* if(not is_tcp(packet) || map.flags.srcsyn && map.flags.dstsyn) */
+                    /* populate_proxy(pkt, map) */
+                /* else */
+                {
+                    /* map.flags.discard = 1 */
+                    /* log(partial) */
+                }
+            }
 
             /* if map.proxy */
                 /* update_and_replay_pkt(pkt, map, pkt_dst) */
             /* else */
             {
-                /* if pkt.payload_len > 0 || map.num_buffered >= 3 */
-                    /* log_weird(pkt) */
-                /* else */
+                /* if pkt.payload_len == 0 || map.num_buffered < 3 */
                     /* buffer_pkt(pkt, map) */
+                /* else maybe log as weird */
             }
 
-            /* if RST in pkt.flags || map.flags.srcfin && map.flags.dstfin */
-                /* rm_map(tuple_hash) */
+            /* if is_tcp(packet) && RST in pkt.flags || map.flags.srcfin && map.flags.dstfin */
+                /* rm_map(hashable_tuple) */
             /* else */
             {
                 /* if FIN in src.flags */
@@ -197,12 +219,13 @@ int main(int argc, char* argv[], char* env[])
         /* else */
             /* log_weird(pkt) */
     if(packet_count % 10 == 0)
-        break;
+        /* check another entry for expiry */
+        break; /* TODO: remove when done debugging */
     }
 
     pcap_close(in_handle);
     /* close(pkg_dst); */
 
-    printf("collected %llu packets\n", packet_count);
+    fprintf(stderr, "Jacked a total of %llu packets\n", packet_count);
     return 0;
 }
