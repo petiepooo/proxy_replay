@@ -15,26 +15,28 @@
 #include <string.h> 
 #include <assert.h>
 
-#include <libpcap.h>
+#include <pcap.h>
 
 #include "hashmap.h"
 
-#define NO_PAYLOAD_MAX_PKT_SIZE 100
+#define NO_PAYLOAD_MAX_IPV4_PKT_SIZE 100 /* TODO: seeing most are 54? */
+#define IPV4_PCAP_HDR_SIZE 32 /* TODO: better size?  */
 #define MAX_IFACE_LEN 32
 #define MAX_PATH_LEN 1024
 #define MAX_FILTER_LEN 1024
 
-struct tuple {
+struct ipv4_tuple {
     uint32_t src_ipv4;
     uint32_t dst_ipv4;
     uint16_t src_port;
     uint16_t dst_port;
 };
-struct maps {
-    struct tuple original_tuple;
-    struct tuple proxy_tuple;
+struct ipv4_maps {
+    struct ipv4_tuple original_tuple;
+    struct ipv4_tuple proxy_tuple;
     uint32_t flags;
-    unsigned char buffers[3][NO_PAYLOAD_MAX_PKT_SIZE];
+    unsigned char header[3][IPV4_PCAP_HDR_SIZE];
+    unsigned char buffers[3][NO_PAYLOAD_MAX_IPV4_PKT_SIZE];
 };
 
 struct options {
@@ -49,7 +51,6 @@ struct options opts;
 void read_options(int argc, char* argv[])
 {
     int opt;
-    memset((void *)&opts, 0, sizeof(opts));
 
     // put ':' at the starting of the string so compiler can distinguish between '?' and ':'
     while((opt = getopt(argc, argv, ":r:w:i:o:h")) != -1)
@@ -91,7 +92,9 @@ void read_options(int argc, char* argv[])
         }
     }
 
-    if(strlen(opts.read_file) > 0 && strlen(opts.read_iface) > 0)
+    if(strlen(opts.read_file) == 0 && strlen(opts.read_iface) == 0)
+        strncpy(opts.read_iface, "en0", MAX_IFACE_LEN);
+    else if(strlen(opts.read_file) > 0 && strlen(opts.read_iface) > 0)
     {
         printf("Cannot read from both file and interface\n");
         assert(0);
@@ -128,14 +131,30 @@ void update_and_replay_pkt(pkt, map, pkt_dst)
 
 int main(int argc, char* argv[], char* env[])
 {
+    uint64_t packet_count = 0;
+    pcap_t* in_handle;
+    char errbuf[PCAP_ERRBUF_SIZE];
+    struct pcap_pkthdr* pheader;
+    struct bpf_program fp;
+    const u_char* packet;
+    int rc;
+
     read_options(argc, argv);
 
-    /* open pkt_src */
+    if(strlen(opts.read_iface) > 0)
+        in_handle = pcap_open_live(opts.read_iface, 0, 1, 2000, errbuf);
+    else
+        in_handle = pcap_open_offline(opts.read_file, errbuf);
+    assert(in_handle != NULL);
+
     /* open pkt_dst */
 
-    /* while(read_pkt(pkt_src)) */
+    while((rc = pcap_next_ex(in_handle, &pheader, &packet)) == 1)
     {
-        /* tuple_hash = hash_pkt_tuple(pkt); */
+        assert(rc);
+        ++packet_count;
+        printf("Jacked a packet with length of [%d]\n", pheader->len);
+        /* tuple_hash = hash_pkt_tuple(packet); */
         /* if (map = lookup_map(tuple_hash)) == NULL */
         {
             /* if RST in pkt.flags or ACK == pkt.flags */
@@ -177,10 +196,13 @@ int main(int argc, char* argv[], char* env[])
         }
         /* else */
             /* log_weird(pkt) */
+    if(packet_count % 10 == 0)
+        break;
     }
 
-    /* close(pkg_src); */
+    pcap_close(in_handle);
     /* close(pkg_dst); */
 
+    printf("collected %llu packets\n", packet_count);
     return 0;
 }
