@@ -11,13 +11,18 @@
 
 #include <stdlib.h> 
 #include <stdio.h> 
+#include <unistd.h>
 #include <string.h> 
+#include <assert.h>
 
 #include <libpcap.h>
 
 #include "hashmap.h"
 
-#define NO_PAYLOAD_MAX_PKT_SIZE 66
+#define NO_PAYLOAD_MAX_PKT_SIZE 100
+#define MAX_IFACE_LEN 32
+#define MAX_PATH_LEN 1024
+#define MAX_FILTER_LEN 1024
 
 struct tuple {
     uint32_t src_ipv4;
@@ -33,12 +38,79 @@ struct maps {
 };
 
 struct options {
+    char read_file[MAX_PATH_LEN];
+    char write_file[MAX_PATH_LEN];
+    char read_iface[MAX_IFACE_LEN];
+    char write_iface[MAX_IFACE_LEN];
+    char filter[MAX_FILTER_LEN];
 };
 struct options opts;
 
-void read_options(int argc, char** argv)
+void read_options(int argc, char* argv[])
 {
+    int opt;
     memset((void *)&opts, 0, sizeof(opts));
+
+    // put ':' at the starting of the string so compiler can distinguish between '?' and ':'
+    while((opt = getopt(argc, argv, ":r:w:i:o:h")) != -1)
+    {
+        switch(opt)
+        {
+        case 'r':  /* read pcap file */
+            assert(strlen(optarg) < MAX_PATH_LEN);
+            strncpy(opts.read_file, optarg, MAX_PATH_LEN);
+            break;
+
+        case 'w':  /* write pcap file */
+            assert(strlen(optarg) < MAX_PATH_LEN);
+            strncpy(opts.write_file, optarg, MAX_PATH_LEN);
+            break;
+
+        case 'i':  /* read from iface */
+            assert(strlen(optarg) < MAX_IFACE_LEN);
+            strncpy(opts.read_iface, optarg, MAX_IFACE_LEN);
+            break;
+
+        case 'o':  /* write to iface */
+            assert(strlen(optarg) < MAX_IFACE_LEN);
+            strncpy(opts.write_iface, optarg, MAX_IFACE_LEN);
+            break;
+
+        case 'h':  /* display help */
+            printf("todo: display help\n");
+            exit(0);
+
+        case ':':  /* no value supplied */
+            printf("option %c requires a value\n", optopt);
+            exit(-1);
+
+        case '?':  /* unknown option */
+        default:
+            printf("option %c not recognized\n", optopt);
+            exit(-1);
+        }
+    }
+
+    if(strlen(opts.read_file) > 0 && strlen(opts.read_iface) > 0)
+    {
+        printf("Cannot read from both file and interface\n");
+        assert(0);
+    }
+    if(strlen(opts.write_file) > 0 && strlen(opts.write_iface) > 0)
+    {
+        printf("Cannot write to both file and interface\n");
+        assert(0);
+    }
+
+    if(optind < argc)
+    {
+        printf("bpf filter: ");
+        for(; optind < argc; optind++)
+        {
+            printf("%s ", argv[optind]);
+        }
+        printf("\n");
+    }
 }
 
 void update_and_replay_pkt(pkt, map, pkt_dst)
@@ -54,7 +126,7 @@ void update_and_replay_pkt(pkt, map, pkt_dst)
     /* replay_packet(pkt) */
 }
 
-int main(int argc, char** argv, char** env)
+int main(int argc, char* argv[], char* env[])
 {
     read_options(argc, argv);
 
