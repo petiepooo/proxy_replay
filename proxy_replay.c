@@ -105,6 +105,13 @@ void read_options(int argc, char* argv[])
         }
     }
 
+    for(int len=0; optind < argc; optind++)
+    {
+        len += snprintf(opts.filter+len, MAX_FILTER_LEN-len, "%s", argv[optind]);
+        len += snprintf(opts.filter+len, MAX_FILTER_LEN-len, " ");
+        /* TODO: warn if truncated (silently fails now) */
+    }
+
     if(strlen(opts.read_file) == 0 && strlen(opts.read_iface) == 0)
         strncpy(opts.read_iface, "en0", MAX_IFACE_LEN);
     else if(strlen(opts.read_file) > 0 && strlen(opts.read_iface) > 0)
@@ -123,13 +130,8 @@ void read_options(int argc, char* argv[])
     if(opts.debug)
     {
         fprintf(stderr, "debug mode enabled\n");
-        if(optind < argc)
-        {
-            fprintf(stderr, "bpf filter: ");
-            for(; optind < argc; optind++)
-                fprintf(stderr, "%s ", argv[optind]);
-        fprintf(stderr, "\n");
-        }
+        if(strlen(opts.filter))
+            fprintf(stderr, "filter: %s\n", opts.filter);
     }
 }
 
