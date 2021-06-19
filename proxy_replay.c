@@ -103,6 +103,8 @@ struct options {
 };
 struct options opts;
 
+enum pkt_type {TCP6, TCP4, UDP6, UDP4, UNKNOWN};
+
 void read_options(int argc, char* argv[])
 {
     int opt;
@@ -212,12 +214,24 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
 
     /* extract IPs and ports */
     ethernet = (struct sniff_ethernet*)(pkt);
+    if(opts.debug) {
+        fprintf(stderr, "ether_type:0x%04hx:", ntohs(ethernet->ether_type));
+    }
+    if(ntohs(ethernet->ether_type) != 2048)
+        return;
     ip = (struct sniff_ip*)(pkt + SIZE_ETHERNET);
+    if(opts.debug) {
+        fprintf(stderr, "ip len:%hd:", ntohs(ip->ip_len));
+        fprintf(stderr, "proto:%d:", ip->ip_p);
+        fprintf(stderr, "ver:%d:", (ip->ip_vhl)>>4);
+    }
     size_ip = IP_HL(ip)*4;
     if (size_ip < 20) {
         printf("   * Invalid IP header length: %u bytes\n", size_ip);
         return;
     }
+    if(ip->ip_p != 6)
+        return;
     tcp = (struct sniff_tcp*)(pkt + SIZE_ETHERNET + size_ip);
     size_tcp = TH_OFF(tcp)*4;
     if (size_tcp < 20) {
@@ -225,6 +239,9 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
         return;
     }
     payload = (u_char *)(pkt + SIZE_ETHERNET + size_ip + size_tcp);
+    if(opts.debug) {
+        fprintf(stderr, "\n");
+    }
 
     if(src_ipv4 < dst_ipv4)
     {
@@ -248,11 +265,15 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
     }
 }
 
-u_char extract_flags_if_tcp(const u_char* pkt)
+u_char extract_tcp4_flags(const u_char* pkt)
 {
-    /* if not tcp */
-        return 0;
     /* return tcp flag field */
+    return 0;
+}
+
+enum pkt_type get_pkt_proto(const u_char* pkt)
+{
+    return TCP4;
 }
 
 int main(int argc, char* argv[], char* env[])
@@ -266,6 +287,7 @@ int main(int argc, char* argv[], char* env[])
     int rc;
     u_char tcp_flags;
     struct ipv4_tuple hashable_tuple;
+    enum pkt_type pkt_proto;
 
     read_options(argc, argv);
 
@@ -283,11 +305,18 @@ int main(int argc, char* argv[], char* env[])
             continue;
         assert(rc);
         ++packet_count;
-        if(opts.debug)
-            fprintf(stderr, "Jacked a packet with length of [%d]\n", pheader->len);
 
         hash_pkt_tuple(packet, &hashable_tuple);
-        tcp_flags = extract_flags_if_tcp(packet);
+        pkt_proto = get_pkt_proto(packet);
+	switch(pkt_proto)
+        {
+        case TCP4:
+            tcp_flags = extract_tcp4_flags(packet);
+            break;
+        default:
+            tcp_flags = 0;
+            break;
+        } 
 
         /* if (map = lookup_map(hashable_tuple)) == NULL */
         {
@@ -337,7 +366,7 @@ int main(int argc, char* argv[], char* env[])
         /* else */
             /* log_weird(pkt) */
 
-    if(packet_count % 10 == 0)
+    if(packet_count % 30 == 0)
         /* check another entry for expiry */
         break; /* TODO: remove when done debugging */
     }
