@@ -103,11 +103,18 @@ struct options {
 };
 struct options opts;
 
-enum pkt_type {TCP6, TCP4, UDP6, UDP4, UNKNOWN};
+enum pkt_type_e {UNKNOWN, TCP6, TCP4, UDP6, UDP4};
+struct ipv4_info {
+    uint16_t payload_len;
+    enum pkt_type_e pkt_type;
+    u_char tcp_flags;
+};
+
 
 void read_options(int argc, char* argv[])
 {
     int opt;
+    int len;
 
     // put ':' at the starting of the string so compiler can distinguish between '?' and ':'
     while((opt = getopt(argc, argv, ":r:w:i:o:hd")) != -1)
@@ -135,7 +142,8 @@ void read_options(int argc, char* argv[])
             break;
 
         case 'h':  /* display help */
-            printf("todo: display help\n");
+            printf("proxy_replay: replays packets received with PROXY protocol as they would look before proxying\n");
+            printf("usage: proxy_replay [-h] [-d] -i iface | -r pcap [ -o iface | -w pcap ]\n");
             exit(0);
 
         case 'd':  /* debug mode */
@@ -153,11 +161,15 @@ void read_options(int argc, char* argv[])
         }
     }
 
-    for(int len=0; optind < argc; optind++)
+    for(len=0; optind < argc; optind++)
     {
         len += snprintf(opts.filter+len, MAX_FILTER_LEN-len, "%s", argv[optind]);
         len += snprintf(opts.filter+len, MAX_FILTER_LEN-len, " ");
-        /* TODO: warn if truncated (silently fails now) */
+        if(len > MAX_FILTER_LEN - 1)
+        {
+            fprintf(stderr, "proxy_replay: ERROR: filter length %u exceeds maximum of %u\n", len, MAX_FILTER_LEN);
+            exit(-1);
+        }
     }
 
     if(strlen(opts.read_file) == 0 && strlen(opts.read_iface) == 0)
@@ -196,7 +208,7 @@ void update_and_replay_pkt(pkt, map, pkt_dst)
     /* replay_packet(pkt) */
 }
 
-void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
+void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple, struct ipv4_info* info)
 {
     uint32_t src_ipv4 = 0;
     uint32_t dst_ipv4 = 0;
@@ -207,10 +219,12 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
     struct sniff_ip* ip;
     struct sniff_tcp* tcp;
     u_char *payload;
-    int size_ip;
-    int size_tcp;
+    short size_ip;
+    short size_tcp;
 
     memset(tuple, 0, sizeof(struct ipv4_tuple));
+    memset(info, 0, sizeof(struct ipv4_info));
+    info->pkt_type = UNKNOWN;
 
     /* extract IPs and ports */
     ethernet = (struct sniff_ethernet*)(pkt);
@@ -220,29 +234,34 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
     if(ntohs(ethernet->ether_type) != 2048)
         return;
     ip = (struct sniff_ip*)(pkt + SIZE_ETHERNET);
-    if(opts.debug) {
-        fprintf(stderr, "ip len:%hd:", ntohs(ip->ip_len));
-        fprintf(stderr, "proto:%d:", ip->ip_p);
-        fprintf(stderr, "ver:%d:", (ip->ip_vhl)>>4);
-    }
     size_ip = IP_HL(ip)*4;
-    if (size_ip < 20) {
-        printf("   * Invalid IP header length: %u bytes\n", size_ip);
+    if(opts.debug) {
+        fprintf(stderr, "ip-len:%hu:", size_ip);
+        fprintf(stderr, "proto:%u:", ip->ip_p);
+        fprintf(stderr, "ver:%u:", (ip->ip_vhl)>>4);
+    }
+    if (size_ip < 20 || size_ip > 1600) {
+        fprintf(stderr, "   * Invalid IP header length: %u bytes\n", size_ip);
         return;
     }
-    if(ip->ip_p != 6)
+    if(ip->ip_p != 6) /* not TCP */
         return;
     tcp = (struct sniff_tcp*)(pkt + SIZE_ETHERNET + size_ip);
     size_tcp = TH_OFF(tcp)*4;
-    if (size_tcp < 20) {
+    if (size_tcp < 20 || size_tcp > 1600) {
         printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
         return;
     }
-    payload = (u_char *)(pkt + SIZE_ETHERNET + size_ip + size_tcp);
+    info->payload_len = ntohs(ip->ip_len) - size_ip - size_tcp;
+    info->pkt_type = TCP4;
+    info->tcp_flags = tcp->th_flags;
     if(opts.debug) {
-        fprintf(stderr, "\n");
+        fprintf(stderr, "tcp-len:%hu:", size_tcp);
+        fprintf(stderr, "payload:%u bytes\n", info->payload_len);
     }
 
+    src_ipv4 = ntohl(ip->ip_src.s_addr);
+    dst_ipv4 = ntohl(ip->ip_dst.s_addr);
     if(src_ipv4 < dst_ipv4)
     {
         tuple->src_ipv4 = src_ipv4;
@@ -253,6 +272,8 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
         tuple->src_ipv4 = dst_ipv4;
         tuple->dst_ipv4 = src_ipv4;
     }
+    src_port = ntohs(tcp->th_sport);
+    dst_port = ntohs(tcp->th_dport);
     if(src_port < dst_port)
     {
         tuple->src_port = src_port;
@@ -263,18 +284,14 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple)
         tuple->src_port = dst_port;
         tuple->dst_port = src_port;
     }
+    if(opts.debug) {
+        fprintf(stderr, "info: %u:%u:%u, hash: %u:%u:%hu:%hu\n", \
+                info->pkt_type, info->payload_len, info->tcp_flags, \
+                tuple->src_ipv4, tuple->dst_ipv4, tuple->src_port, tuple->dst_port);
+    }
+
 }
 
-u_char extract_tcp4_flags(const u_char* pkt)
-{
-    /* return tcp flag field */
-    return 0;
-}
-
-enum pkt_type get_pkt_proto(const u_char* pkt)
-{
-    return TCP4;
-}
 
 int main(int argc, char* argv[], char* env[])
 {
@@ -285,9 +302,8 @@ int main(int argc, char* argv[], char* env[])
     struct bpf_program fp;
     const u_char* packet;
     int rc;
-    u_char tcp_flags;
     struct ipv4_tuple hashable_tuple;
-    enum pkt_type pkt_proto;
+    struct ipv4_info ipv4_info;
 
     read_options(argc, argv);
 
@@ -306,24 +322,22 @@ int main(int argc, char* argv[], char* env[])
         assert(rc);
         ++packet_count;
 
-        hash_pkt_tuple(packet, &hashable_tuple);
-        pkt_proto = get_pkt_proto(packet);
-	switch(pkt_proto)
+        hash_pkt_tuple(packet, &hashable_tuple, &ipv4_info);
+	switch(ipv4_info.pkt_type)
         {
         case TCP4:
-            tcp_flags = extract_tcp4_flags(packet);
             break;
+        /* TODO: handle other types */
         default:
-            tcp_flags = 0;
             break;
         } 
 
         /* if (map = lookup_map(hashable_tuple)) == NULL */
         {
-            if(tcp_flags == 0 || (tcp_flags & TH_RST) == 0)
+            if(ipv4_info.tcp_flags == 0 || (ipv4_info.tcp_flags & TH_RST) == 0)
             {
                 /* map = create_map(hashable_tuple, packet) */
-                if(tcp_flags && (tcp_flags & TH_SYN) == 0)
+                if(ipv4_info.tcp_flags && (ipv4_info.tcp_flags & TH_SYN) == 0)
                 {
                     /* map.flags.discard = 1 */
                     /* log(partial) */
@@ -340,7 +354,7 @@ int main(int argc, char* argv[], char* env[])
 
             /* if(not map.proxy && pkt.payload_len > 0) */
             {
-                if(tcp_flags || (tcp_flags & TH_SYN) == TH_SYN)
+                if(ipv4_info.tcp_flags || (ipv4_info.tcp_flags & TH_SYN) == TH_SYN)
                 {
                     /* populate_proxy(pkt, map) */
                 }
