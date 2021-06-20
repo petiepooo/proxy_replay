@@ -20,12 +20,6 @@
 
 #include "hashmap.h"
 
-#define NO_PAYLOAD_MAX_IPV4_PKT_SIZE 100 /* TODO: seeing most are 54? */
-#define IPV4_PCAP_HDR_SIZE 32 /* TODO: better size?  */
-#define MAX_IFACE_LEN 32
-#define MAX_PATH_LEN 1024
-#define MAX_FILTER_LEN 1024
-
 #define SIZE_ETHERNET 14
 #define ETHER_ADDR_LEN	6
 
@@ -78,6 +72,12 @@ struct sniff_tcp {
 };
 
 
+#define IPV4_PCAP_HDR_SIZE 16		/* 4x 32-bit ints */
+#define NO_PAYLOAD_MAX_IPV4_PKT_SIZE 80	/* SYN with 20-byte tcp opts is 74 bytes */
+#define MAX_IFACE_LEN 32
+#define MAX_PATH_LEN 1024
+#define MAX_FILTER_LEN 1024
+
 struct ipv4_tuple {
     uint32_t src_ipv4;
     uint32_t dst_ipv4;
@@ -85,12 +85,33 @@ struct ipv4_tuple {
     uint16_t dst_port;
 };
 
-struct ipv4_maps {
-    struct ipv4_tuple original_tuple;
+enum pkt_type_e {UNKNOWN, TCP6, TCP4, UDP6, UDP4};
+
+struct ipv4_info {
+    enum pkt_type_e pkt_type;
+    uint16_t payload_len;
+    u_char tcp_flags;
+};
+
+struct tcp4_pkt {
+    u_char header[IPV4_PCAP_HDR_SIZE];
+    u_char buffers[NO_PAYLOAD_MAX_IPV4_PKT_SIZE];
+};
+
+struct ipv4_map {
+    struct ipv4_tuple sorted_tuple; /* must be first field in struct */
+    struct ipv4_tuple orig_tuple;
     struct ipv4_tuple proxy_tuple;
-    uint32_t flags;
-    unsigned char header[3][IPV4_PCAP_HDR_SIZE];
-    unsigned char buffers[3][NO_PAYLOAD_MAX_IPV4_PKT_SIZE];
+    uint64_t created;
+    uint64_t last_seen;
+    struct ipv4_info info;
+    u_char stream_flags;
+#define MF_DISCARD 0x1
+#define MF_SRCFIN  0x2
+#define MF_DSTFIN  0x4
+    struct tcp4_pkt* syn_pkt;
+    struct tcp4_pkt* synack_pkt;
+    struct tcp4_pkt* ack_pkt;
 };
 
 struct options {
@@ -99,16 +120,35 @@ struct options {
     char read_iface[MAX_IFACE_LEN];
     char write_iface[MAX_IFACE_LEN];
     char filter[MAX_FILTER_LEN];
-    int debug;
+    /* bitfield for option flags */
+    uint32_t debug : 1;
+    uint32_t verbose : 1;
+    uint32_t no_warn : 1;
 };
 struct options opts;
 
-enum pkt_type_e {UNKNOWN, TCP6, TCP4, UDP6, UDP4};
-struct ipv4_info {
-    uint16_t payload_len;
-    enum pkt_type_e pkt_type;
-    u_char tcp_flags;
-};
+/* hashmap helper funcs */
+int ipv4_map_compare(const void *a, const void *b, void *udata) {
+    const struct ipv4_map *ua = a;
+    const struct ipv4_map *ub = b;
+    return (ua->sorted_tuple.src_ipv4 < ub->sorted_tuple.src_ipv4)
+        || (ua->sorted_tuple.dst_ipv4 < ub->sorted_tuple.dst_ipv4)
+        || (ua->sorted_tuple.src_port < ub->sorted_tuple.src_port)
+        || (ua->sorted_tuple.dst_port < ub->sorted_tuple.dst_port);
+}
+
+uint64_t ipv4_map_hash(const void *item, uint64_t seed0, uint64_t seed1) {
+    const struct ipv4_tuple* tuple = item;
+    return hashmap_sip(tuple, sizeof(struct ipv4_tuple), seed0, seed1);
+}
+
+/*
+bool ipv4_map_iter(const void *item, void *udata) {
+    const struct ipv4_tuple *tuple = item;
+    printf("%s (age=%d)\n", user->name, user->age);
+    return true;
+}
+*/
 
 
 void read_options(int argc, char* argv[])
@@ -117,7 +157,7 @@ void read_options(int argc, char* argv[])
     int len;
 
     // put ':' at the starting of the string so compiler can distinguish between '?' and ':'
-    while((opt = getopt(argc, argv, ":r:w:i:o:hd")) != -1)
+    while((opt = getopt(argc, argv, ":r:w:i:o:hdvn")) != -1)
     {
         switch(opt)
         {
@@ -148,6 +188,14 @@ void read_options(int argc, char* argv[])
 
         case 'd':  /* debug mode */
             opts.debug = 1;
+            break;
+
+        case 'v':  /* verbose mode */
+            opts.verbose = 1;
+            break;
+
+        case 'n':  /* no odd-packet warnings */
+            opts.no_warn = 1;
             break;
 
         case ':':  /* no value supplied */
@@ -190,8 +238,14 @@ void read_options(int argc, char* argv[])
     if(opts.debug)
     {
         fprintf(stderr, "debug mode enabled\n");
-        if(strlen(opts.filter))
-            fprintf(stderr, "filter: %s\n", opts.filter);
+        if(opts.verbose)
+        {
+            if(strlen(opts.filter))
+                fprintf(stderr, "filter: %s\n", opts.filter);
+            fprintf(stderr, "sizeof ipv4_map: %ld, ", sizeof(struct ipv4_map));
+            fprintf(stderr, "sizeof tcp4_pkt: %ld ", sizeof(struct tcp4_pkt));
+            fprintf(stderr, "(best if equal for dynamically allocation)\n");
+        }
     }
 }
 
@@ -208,13 +262,8 @@ void update_and_replay_pkt(pkt, map, pkt_dst)
     /* replay_packet(pkt) */
 }
 
-void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple, struct ipv4_info* info)
+void parse_pkt(const u_char* pkt, struct ipv4_tuple* orig_tuple, struct ipv4_tuple* sorted_tuple, struct ipv4_info* info)
 {
-    uint32_t src_ipv4 = 0;
-    uint32_t dst_ipv4 = 0;
-    uint16_t src_port = 0;
-    uint16_t dst_port = 0;
-
     struct sniff_ethernet* ethernet;
     struct sniff_ip* ip;
     struct sniff_tcp* tcp;
@@ -222,20 +271,21 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple, struct ipv4_inf
     short size_ip;
     short size_tcp;
 
-    memset(tuple, 0, sizeof(struct ipv4_tuple));
+    memset(orig_tuple, 0, sizeof(struct ipv4_tuple));
+    memset(sorted_tuple, 0, sizeof(struct ipv4_tuple));
     memset(info, 0, sizeof(struct ipv4_info));
     info->pkt_type = UNKNOWN;
 
     /* extract IPs and ports */
     ethernet = (struct sniff_ethernet*)(pkt);
-    if(opts.debug) {
-        fprintf(stderr, "ether_type:0x%04hx:", ntohs(ethernet->ether_type));
+    if(opts.debug && opts.verbose) {
+        fprintf(stderr, "new packet: ether_type:0x%04hx:", ntohs(ethernet->ether_type));
     }
     if(ntohs(ethernet->ether_type) != 2048)
         return;
     ip = (struct sniff_ip*)(pkt + SIZE_ETHERNET);
     size_ip = IP_HL(ip)*4;
-    if(opts.debug) {
+    if(opts.debug && opts.verbose) {
         fprintf(stderr, "ip-len:%hu:", size_ip);
         fprintf(stderr, "proto:%u:", ip->ip_p);
         fprintf(stderr, "ver:%u:", (ip->ip_vhl)>>4);
@@ -255,55 +305,66 @@ void hash_pkt_tuple(const u_char* pkt, struct ipv4_tuple* tuple, struct ipv4_inf
     info->payload_len = ntohs(ip->ip_len) - size_ip - size_tcp;
     info->pkt_type = TCP4;
     info->tcp_flags = tcp->th_flags;
-    if(opts.debug) {
+    if(opts.debug && opts.verbose) {
         fprintf(stderr, "tcp-len:%hu:", size_tcp);
         fprintf(stderr, "payload:%u bytes\n", info->payload_len);
     }
 
-    src_ipv4 = ntohl(ip->ip_src.s_addr);
-    dst_ipv4 = ntohl(ip->ip_dst.s_addr);
-    if(src_ipv4 < dst_ipv4)
-    {
-        tuple->src_ipv4 = src_ipv4;
-        tuple->dst_ipv4 = dst_ipv4;
-    }
+    orig_tuple->src_ipv4 = ntohl(ip->ip_src.s_addr), orig_tuple->dst_ipv4 = ntohl(ip->ip_dst.s_addr);
+    if(orig_tuple->src_ipv4 < orig_tuple->dst_ipv4)
+        sorted_tuple->src_ipv4 = orig_tuple->src_ipv4, sorted_tuple->dst_ipv4 = orig_tuple->dst_ipv4;
     else
-    {
-        tuple->src_ipv4 = dst_ipv4;
-        tuple->dst_ipv4 = src_ipv4;
-    }
-    src_port = ntohs(tcp->th_sport);
-    dst_port = ntohs(tcp->th_dport);
-    if(src_port < dst_port)
-    {
-        tuple->src_port = src_port;
-        tuple->dst_port = dst_port;
-    }
+        sorted_tuple->src_ipv4 = orig_tuple->dst_ipv4, sorted_tuple->dst_ipv4 = orig_tuple->src_ipv4;
+
+    orig_tuple->src_port = ntohs(tcp->th_sport), orig_tuple->dst_port = ntohs(tcp->th_dport);
+    if(orig_tuple->src_port < orig_tuple->dst_port)
+        sorted_tuple->src_port = orig_tuple->src_port, sorted_tuple->dst_port = orig_tuple->dst_port;
     else
-    {
-        tuple->src_port = dst_port;
-        tuple->dst_port = src_port;
-    }
-    if(opts.debug) {
-        fprintf(stderr, "info: %u:%u:%u, hash: %u:%u:%hu:%hu\n", \
-                info->pkt_type, info->payload_len, info->tcp_flags, \
-                tuple->src_ipv4, tuple->dst_ipv4, tuple->src_port, tuple->dst_port);
+        sorted_tuple->src_port = orig_tuple->dst_port, sorted_tuple->dst_port = orig_tuple->src_port;
+
+    if(opts.debug && opts.verbose) {
+        fprintf(stderr, "internal structs: info: %u:%u:%u\n", \
+                info->pkt_type, info->payload_len, info->tcp_flags);
+        fprintf(stderr, "\t\t  orig_tuple: %u:%u:%hu:%hu\n", \
+                orig_tuple->src_ipv4, orig_tuple->dst_ipv4, \
+                orig_tuple->src_port, orig_tuple->dst_port);
+        fprintf(stderr, "\t\t  sort_tuple: %u:%u:%hu:%hu\n", \
+                sorted_tuple->src_ipv4, sorted_tuple->dst_ipv4, \
+                sorted_tuple->src_port, sorted_tuple->dst_port);
     }
 
 }
 
+struct ipv4_map* create_populate_map(struct hashmap* ipv4_hashmap, struct ipv4_tuple* orig_tuple, struct ipv4_tuple* sorted_tuple, struct ipv4_info* info)
+{
+    struct ipv4_map map;
+    struct ipv4_map* hash;
+
+    memcpy(&map.sorted_tuple, &sorted_tuple, sizeof(struct ipv4_tuple));
+    memcpy(&map.orig_tuple, &orig_tuple, sizeof(struct ipv4_tuple));
+    memcpy(&map.info, &info, sizeof(struct ipv4_tuple));
+    map.created = time(NULL);
+    map.last_seen = time(NULL);
+    hashmap_set(ipv4_hashmap, &map);
+    hash = hashmap_get(ipv4_hashmap, &map);
+    assert(hash != NULL);
+    return hash;
+}
 
 int main(int argc, char* argv[], char* env[])
 {
-    uint64_t packet_count = 0;
+    uint64_t packet_count;
     pcap_t* in_handle;
     char errbuf[PCAP_ERRBUF_SIZE];
     struct pcap_pkthdr* pheader;
     struct bpf_program fp;
     const u_char* packet;
     int rc;
-    struct ipv4_tuple hashable_tuple;
+    struct ipv4_tuple orig_tuple;;
+    struct ipv4_tuple sorted_tuple;
     struct ipv4_info ipv4_info;
+    struct ipv4_map* map;
+    struct hashmap *ipv4_hashmap;
 
     read_options(argc, argv);
 
@@ -315,6 +376,9 @@ int main(int argc, char* argv[], char* env[])
 
     /* open pkt_dst */
 
+    ipv4_hashmap = hashmap_new(sizeof(struct ipv4_map), 0, 0, 0, 
+                               ipv4_map_hash, ipv4_map_compare, NULL);
+
     while((rc = pcap_next_ex(in_handle, &pheader, &packet)) == 1 || rc == 0)
     {
         if(rc == 0)
@@ -322,63 +386,69 @@ int main(int argc, char* argv[], char* env[])
         assert(rc);
         ++packet_count;
 
-        hash_pkt_tuple(packet, &hashable_tuple, &ipv4_info);
+        parse_pkt(packet, &orig_tuple, &sorted_tuple, &ipv4_info);
 	switch(ipv4_info.pkt_type)
         {
         case TCP4:
+            if ((map = hashmap_get(ipv4_hashmap, &sorted_tuple)) == NULL)
+            {
+                if(ipv4_info.tcp_flags == 0 || (ipv4_info.tcp_flags & TH_RST) == 0)
+                {
+                    map = create_populate_map(ipv4_hashmap, &orig_tuple, &sorted_tuple, &ipv4_info);
+                    if(opts.debug) {
+                        fprintf(stderr, "map created at %p\n", map);
+                    }
+                    if(map && ipv4_info.tcp_flags && (ipv4_info.tcp_flags & TH_SYN) == 0)
+                    {
+                        /* map.flags.discard = 1 */
+                        /* log(partial) */
+                    }
+                }
+            }
+
+            if(map)
+            {
+                /* update_map_ts(); */
+
+                /* if(map.flags.discard) */
+                    /* continue; */
+
+                /* if(not map.proxy && pkt.payload_len > 0) */
+                {
+                    if(ipv4_info.tcp_flags || (ipv4_info.tcp_flags & TH_SYN) == TH_SYN)
+                    {
+                        /* populate_proxy(pkt, map) */
+                    }
+                    /* else */ /* TODO: handle UDP? */
+                    {
+                        /* map.flags.discard = 1 */
+                        /* log(partial stream) */
+                    }
+                }
+
+                /* if map.proxy */
+                    /* update_and_replay_pkt(pkt, map, pkt_dst) */
+                /* else */
+                {
+                    /* if pkt.payload_len == 0 || map.num_buffered < 3 */
+                        /* buffer_pkt(pkt, map) */
+                    /* else maybe log as weird */
+                }
+
+                /* if is_tcp(packet) && RST in pkt.flags || map.flags.srcfin && map.flags.dstfin */
+                    /* rm_map(sorted_tuple) */
+            }
+            /* else */
+                /* log_weird(pkt) */
+
             break;
-        /* TODO: handle other types */
+
+        /* TODO: handle other packet types */
+
         default:
             break;
         } 
 
-        /* if (map = lookup_map(hashable_tuple)) == NULL */
-        {
-            if(ipv4_info.tcp_flags == 0 || (ipv4_info.tcp_flags & TH_RST) == 0)
-            {
-                /* map = create_map(hashable_tuple, packet) */
-                if(ipv4_info.tcp_flags && (ipv4_info.tcp_flags & TH_SYN) == 0)
-                {
-                    /* map.flags.discard = 1 */
-                    /* log(partial) */
-                }
-            }
-        }
-
-        /* if map != NULL */
-        {
-            /* update_map_ts(); */
-
-            /* if(map.flags.discard) */
-                /* continue; */
-
-            /* if(not map.proxy && pkt.payload_len > 0) */
-            {
-                if(ipv4_info.tcp_flags || (ipv4_info.tcp_flags & TH_SYN) == TH_SYN)
-                {
-                    /* populate_proxy(pkt, map) */
-                }
-                /* else */ /* TODO: handle UDP? */
-                {
-                    /* map.flags.discard = 1 */
-                    /* log(partial stream) */
-                }
-            }
-
-            /* if map.proxy */
-                /* update_and_replay_pkt(pkt, map, pkt_dst) */
-            /* else */
-            {
-                /* if pkt.payload_len == 0 || map.num_buffered < 3 */
-                    /* buffer_pkt(pkt, map) */
-                /* else maybe log as weird */
-            }
-
-            /* if is_tcp(packet) && RST in pkt.flags || map.flags.srcfin && map.flags.dstfin */
-                /* rm_map(hashable_tuple) */
-        }
-        /* else */
-            /* log_weird(pkt) */
 
     if(packet_count % 30 == 0)
         /* check another entry for expiry */
@@ -389,6 +459,7 @@ int main(int argc, char* argv[], char* env[])
     /* close(pkg_dst); */
 
     if(opts.debug)
-        fprintf(stderr, "Jacked a total of %llu packets\n", packet_count);
+        fprintf(stderr, "total packets handled: %llu\n", packet_count);
+        fprintf(stderr, "ts: %lu\n", (unsigned long)time(NULL)); 
     return 0;
 }
