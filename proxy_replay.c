@@ -109,8 +109,9 @@ struct ipv4_conn {
     //struct ipv4_info info;
     uint32_t stream_flags;
 #define MF_DISCARD 0x1
-#define MF_SRCFIN  0x2
-#define MF_DSTFIN  0x4
+#define MF_BYPASS  0x2
+#define MF_SRCFIN  0x4
+#define MF_DSTFIN  0x8
     struct tcp4_pkt* syn_pkt;
     struct tcp4_pkt* synack_pkt;
     struct tcp4_pkt* ack_pkt;
@@ -254,8 +255,7 @@ void read_options(int argc, char* argv[])
             if(strlen(opts.filter))
                 fprintf(stderr, "filter: %s\n", opts.filter);
             fprintf(stderr, "sizeof ipv4_conn: %ld, ", sizeof(struct ipv4_conn));
-            fprintf(stderr, "sizeof tcp4_pkt: %ld ", sizeof(struct tcp4_pkt));
-            fprintf(stderr, "(best if equal for dynamically allocation)\n");
+            fprintf(stderr, "sizeof tcp4_pkt: %ld\n", sizeof(struct tcp4_pkt));
         }
     }
 }
@@ -385,8 +385,7 @@ void populate_ipv4_proxy(struct ipv4_conn* conn, const u_char* packet, struct ip
     {
         if(opts.debug)
             fprintf(stderr, "payload string not a match; setting to bypass\n");
-        /* TODO: actually bypass, not discard... */
-        conn->stream_flags |= MF_DISCARD;
+        conn->stream_flags |= MF_BYPASS;
         return;
     }
 
@@ -423,16 +422,14 @@ void populate_ipv4_proxy(struct ipv4_conn* conn, const u_char* packet, struct ip
     {
         if(opts.debug)
             fprintf(stderr, "payload string not formatted correctly; setting to bypass\n");
-        /* TODO: actually bypass, not discard... */
-        conn->stream_flags |= MF_DISCARD;
+        conn->stream_flags |= MF_BYPASS;
         return;
     }
     if((inet_aton(dst_ip, &tuple.dst_ipv4) == 0) || (inet_aton(src_ip, &tuple.src_ipv4) == 0))
     {
         if(opts.debug)
             fprintf(stderr, "error converting IP addresses; setting to bypass\n");
-        /* TODO: actually bypass, not discard... */
-        conn->stream_flags |= MF_DISCARD;
+        conn->stream_flags |= MF_BYPASS;
         return;
     }
     conn->proxy_tuple.dst_ipv4.s_addr = ntohl(tuple.dst_ipv4.s_addr);
@@ -452,11 +449,11 @@ void save_tcp4_handshake(struct ipv4_conn* conn, const u_char* packet, struct ip
 {
 }
 
-void replay_tcp4_handshake(struct ipv4_conn* conn, pcap_t* handle)
+void replay_tcp4_handshake(struct ipv4_conn* conn, pcap_dumper_t* handle)
 {
 }
 
-void update_and_replay_pkt(const u_char* pkt, struct ipv4_conn* conn, pcap_t* handle)
+void update_and_replay_pkt(const u_char* pkt, struct ipv4_conn* conn, pcap_dumper_t* handle)
 {
     /* while(map.num_buffered > 0) */
     {
@@ -473,7 +470,8 @@ int main(int argc, char* argv[], char* env[])
 {
     uint64_t packet_count;
     pcap_t* in_handle;
-    pcap_t* out_handle;
+    pcap_t* dead_handle;
+    pcap_dumper_t* out_handle;
     char errbuf[PCAP_ERRBUF_SIZE];
     struct pcap_pkthdr* pheader;
     struct bpf_program fp;
@@ -494,6 +492,14 @@ int main(int argc, char* argv[], char* env[])
     assert(in_handle != NULL);
 
     /* open pkt_dst */
+    if(strlen(opts.write_iface) > 0)
+        ;
+    else if(strlen(opts.write_file))
+    {
+        dead_handle = pcap_open_dead(DLT_EN10MB, 262144);
+        out_handle = pcap_dump_open(dead_handle, opts.write_file);
+        pcap_close(dead_handle);
+    }
 
     ipv4_hashmap = hashmap_new(sizeof(struct ipv4_conn), 0, 0, 0, 
                                ipv4_conn_hash, ipv4_conn_compare, NULL);
@@ -531,12 +537,12 @@ int main(int argc, char* argv[], char* env[])
                 if(conn->stream_flags & MF_DISCARD)
                     continue;
 
-                if(conn->proxy_tuple.dst_ipv4.s_addr == 0)
+                if(conn->proxy_tuple.dst_ipv4.s_addr == 0 && (conn->stream_flags & MF_BYPASS) == 0)
                 {
                     if(ipv4_info.payload_len > 0)
                     {
                         populate_ipv4_proxy(conn, packet, &ipv4_info);
-                        if(conn->proxy_tuple.dst_ipv4.s_addr)
+                        if(conn->proxy_tuple.dst_ipv4.s_addr || conn->stream_flags & MF_BYPASS)
                         {
                             replay_tcp4_handshake(conn, out_handle);
                             update_and_replay_pkt(packet, conn, out_handle);
@@ -588,7 +594,7 @@ int main(int argc, char* argv[], char* env[])
             break;
         } 
 
-        if(packet_count % 30 == 0)
+        if(packet_count % 100 == 0)
             /* check another entry for expiry */
             break; /* TODO: remove when done debugging */
     }
@@ -602,7 +608,7 @@ int main(int argc, char* argv[], char* env[])
 
     pcap_close(in_handle);
     if(out_handle)
-        pcap_close(out_handle);
+        pcap_dump_close(out_handle);
     hashmap_free(ipv4_hashmap);
 
     return 0;
