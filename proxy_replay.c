@@ -248,7 +248,7 @@ void read_options(int argc, char* argv[])
 
     if(opts.debug)
     {
-        fprintf(stderr, "debug mode enabled\n");
+        fprintf(stderr, "no output specified; debug mode enabled\n");
         if(opts.verbose)
         {
             if(strlen(opts.filter))
@@ -490,7 +490,7 @@ void save_tcp4_handshake(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, co
     }
 }
 
-void replay_tcp4_handshake(struct ipv4_conn* conn, pcap_dumper_t* dumper, pcap_t* injecter)
+void write_tcp4_handshake(struct ipv4_conn* conn, pcap_dumper_t* dumper, pcap_t* injecter)
 {
     if(dumper == NULL && injecter == NULL)
         return;
@@ -518,7 +518,7 @@ void replay_tcp4_handshake(struct ipv4_conn* conn, pcap_dumper_t* dumper, pcap_t
     }
 }
 
-void update_and_replay_pkt(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, const u_char* pkt, pcap_dumper_t* dumper, pcap_t* injecter)
+void update_and_write_pkt(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, const u_char* pkt, pcap_dumper_t* dumper, pcap_t* injecter)
 {
     if(dumper == NULL && injecter == NULL)
         return;
@@ -614,10 +614,11 @@ int main(int argc, char* argv[], char* env[])
                     if(ipv4_info.payload_len > 0)
                     {
                         populate_ipv4_proxy(conn, pheader, packet, &ipv4_info);
-                        if(conn->proxy_tuple.dst_ipv4.s_addr || conn->stream_flags & MF_BYPASS)
+                        if(conn->proxy_tuple.dst_ipv4.s_addr > 0 || conn->stream_flags & MF_BYPASS)
                         {
-                            replay_tcp4_handshake(conn, dump_handle, inject_handle);
-                            update_and_replay_pkt(conn, pheader, packet, dump_handle, inject_handle);
+                            write_tcp4_handshake(conn, dump_handle, inject_handle);
+                            if(conn->stream_flags & MF_BYPASS)
+                                update_and_write_pkt(conn, pheader, packet, dump_handle, inject_handle);
                         }
                     }
                     else
@@ -636,7 +637,9 @@ int main(int argc, char* argv[], char* env[])
                 }
 
                 else
-                    update_and_replay_pkt(conn, pheader, packet, dump_handle, inject_handle);
+                {
+                    update_and_write_pkt(conn, pheader, packet, dump_handle, inject_handle);
+                }
 
                 /* if is_tcp(packet) && RST in pkt.flags || map.flags.srcfin && map.flags.dstfin */
                 if(conn && ipv4_info.tcp_flags && ipv4_info.tcp_flags & TH_RST)
