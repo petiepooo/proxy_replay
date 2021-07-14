@@ -155,18 +155,19 @@ uint64_t ipv4_conn_hash(const void *item, uint64_t seed0, uint64_t seed1) {
 bool ipv4_conn_iter(const void *item, void *udata) {
     const struct ipv4_conn *conn = item;
         fprintf(stderr, "conn: %p\n", conn);
-        fprintf(stderr, "\tsort_tuple: %x:%x:%hu:%hu\n", \
+        fprintf(stderr, "\tsort_tuple: %08x:%08x:%hu:%hu\n", \
                 conn->sorted_tuple.src_ipv4.s_addr, conn->sorted_tuple.dst_ipv4.s_addr, \
                 conn->sorted_tuple.src_port, conn->sorted_tuple.dst_port);
-        fprintf(stderr, "\torig_tuple: %x:%x:%hu:%hu\n", \
+        fprintf(stderr, "\torig_tuple: %08x:%08x:%hu:%hu\n", \
                 conn->orig_tuple.src_ipv4.s_addr, conn->orig_tuple.dst_ipv4.s_addr, \
                 conn->orig_tuple.src_port, conn->orig_tuple.dst_port);
-        fprintf(stderr, "\tproxy_tuple: %x:%x:%hu:%hu\n", \
+        fprintf(stderr, "\tproxy_tuple: %08x:%08x:%hu:%hu\n", \
                 conn->proxy_tuple.src_ipv4.s_addr, conn->proxy_tuple.dst_ipv4.s_addr, \
                 conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
     return true;
 }
 
+/*** end of hashmap helper funcs ***/
 
 void read_options(int argc, char* argv[])
 {
@@ -362,10 +363,10 @@ void parse_pkt(const u_char* pkt, struct ipv4_tuple* orig_tuple, struct ipv4_tup
     /*if(opts.debug && opts.verbose) {
         fprintf(stderr, "internal structs: info: %u:%u:%u\n", \
                 info->pkt_type, info->payload_len, info->tcp_flags);
-        fprintf(stderr, "\t\t  orig_tuple: %x:%x:%hu:%hu\n", \
+        fprintf(stderr, "\t\t  orig_tuple: %08x:%08x:%hu:%hu\n", \
                 orig_tuple->src_ipv4, orig_tuple->dst_ipv4, \
                 orig_tuple->src_port, orig_tuple->dst_port);
-        fprintf(stderr, "\t\t  sort_tuple: %x:%x:%hu:%hu\n", \
+        fprintf(stderr, "\t\t  sort_tuple: %08x:%08x:%hu:%hu\n", \
                 sorted_tuple->src_ipv4, sorted_tuple->dst_ipv4, \
                 sorted_tuple->src_port, sorted_tuple->dst_port);
     }*/
@@ -479,7 +480,7 @@ void populate_tcp4_proxyv1(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, 
     if(opts.debug)
     {
         fprintf(stderr, "map: %p ", conn);
-        fprintf(stderr, "proxy_tuple set to %x:%x:%hu:%hu\n", \
+        fprintf(stderr, "proxy_tuple set to %08x:%08x:%hu:%hu\n", \
                 conn->proxy_tuple.src_ipv4.s_addr, conn->proxy_tuple.dst_ipv4.s_addr, \
                 conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
     }
@@ -623,7 +624,7 @@ int main(int argc, char* argv[], char* env[])
     if(strlen(opts.write_iface) > 0)
         inject_handle = pcap_open_live(opts.write_iface, 0, 1, 100, writeerrbuf);
 
-    ipv4_hashmap = hashmap_new(sizeof(struct ipv4_conn), 0, 0, 0, 
+    ipv4_hashmap = hashmap_new(sizeof(struct ipv4_conn), 512, 0, 0, 
                                ipv4_conn_hash, ipv4_conn_compare, NULL);
 
     while((rc = pcap_next_ex(in_handle, &pheader, &packet)) == 1 || rc == 0)
@@ -643,8 +644,9 @@ int main(int argc, char* argv[], char* env[])
                 {
                     conn = create_populate_map(ipv4_hashmap, &orig_tuple, &sorted_tuple);
                     if(opts.debug) {
-                        fprintf(stderr, "map: %p created for tuple: %x:%x:%hu:%hu\n", \
+                        fprintf(stderr, "map: %p (%lu) created for tuple: %08x:%08x:%hu:%hu\n", \
                                 conn, \
+                                hashmap_count(ipv4_hashmap), \
                                 sorted_tuple.src_ipv4.s_addr, \
                                 sorted_tuple.dst_ipv4.s_addr, \
                                 sorted_tuple.src_port, \
@@ -729,7 +731,14 @@ int main(int argc, char* argv[], char* env[])
             break;
 
         /* TODO: handle other packet types */
-
+        case UDP4:
+            fprintf(stderr, "sorted tuple: %08x:%08x:%hu:%hu\n", \
+                    sorted_tuple.src_ipv4.s_addr, \
+                    sorted_tuple.dst_ipv4.s_addr, \
+                    sorted_tuple.src_port, \
+                    sorted_tuple.dst_port);
+        case TCP6:
+        case UDP6:
         default:
             break;
         } 
