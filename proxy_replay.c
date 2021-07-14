@@ -72,6 +72,12 @@ struct sniff_tcp {
     u_short th_urp;	/* urgent pointer */
 };
 
+struct sniff_udp {
+    u_short uh_sport;	/* source port */
+    u_short uh_dport;	/* destination port */
+    u_short uh_len;	/* length */
+    u_short uh_sum;	/* checksum */
+};
 
 #define NO_PAYLOAD_MAX_IPV4_PKT_SIZE 80	/* SYN with 20-byte tcp opts is 74 bytes */
 #define MAX_IFACE_LEN 32
@@ -264,9 +270,11 @@ void parse_pkt(const u_char* pkt, struct ipv4_tuple* orig_tuple, struct ipv4_tup
     struct sniff_ethernet* ethernet;
     struct sniff_ip* ip;
     struct sniff_tcp* tcp;
+    struct sniff_udp* udp;
     u_char *payload;
     short size_ip;
     short size_tcp;
+    short size_udp;
 
     memset(orig_tuple, 0, sizeof(struct ipv4_tuple));
     memset(sorted_tuple, 0, sizeof(struct ipv4_tuple));
@@ -279,7 +287,10 @@ void parse_pkt(const u_char* pkt, struct ipv4_tuple* orig_tuple, struct ipv4_tup
         fprintf(stderr, "pkt:ether_type:0x%04hx:", ntohs(ethernet->ether_type));
     }
     if(ntohs(ethernet->ether_type) != 2048)
+    {
+        fprintf(stderr, "not-ip\n");
         return;
+    }
     ip = (struct sniff_ip*)(pkt + SIZE_ETHERNET);
     size_ip = IP_HL(ip)*4;
     if(opts.debug && opts.verbose) {
@@ -291,33 +302,58 @@ void parse_pkt(const u_char* pkt, struct ipv4_tuple* orig_tuple, struct ipv4_tup
         fprintf(stderr, "   * Invalid IP header length: %u bytes\n", size_ip);
         return;
     }
-    if(ip->ip_p != 6) /* not TCP */
-        return;
-    tcp = (struct sniff_tcp*)(pkt + SIZE_ETHERNET + size_ip);
-    size_tcp = TH_OFF(tcp)*4;
-    if (size_tcp < 20 || size_tcp > 1600) {
-        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
+    if(ip->ip_p == 6) /* TCP */
+    {
+        tcp = (struct sniff_tcp*)(pkt + SIZE_ETHERNET + size_ip);
+        size_tcp = TH_OFF(tcp)*4;
+        if (size_tcp < 20 || size_tcp > 1600) {
+            printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
+            return;
+        }
+
+        info->pkt_type = TCP4;
+        info->payload_len = ntohs(ip->ip_len) - size_ip - size_tcp;
+        info->payload_offset = SIZE_ETHERNET + size_ip + size_tcp;
+        info->tcp_flags = tcp->th_flags;
+   
+        orig_tuple->src_ipv4.s_addr = ip->ip_src.s_addr, orig_tuple->dst_ipv4.s_addr = ip->ip_dst.s_addr;
+        orig_tuple->src_port = ntohs(tcp->th_sport), orig_tuple->dst_port = ntohs(tcp->th_dport);
+
+        if(opts.debug && opts.verbose) {
+            fprintf(stderr, "tcp-len:%hu:", size_tcp);
+            fprintf(stderr, "flags:0x%x:", info->tcp_flags);
+            fprintf(stderr, "data-start:%u:", info->payload_offset);
+            fprintf(stderr, "len:%u\n", info->payload_len);
+        }
+    }
+    else if(ip->ip_p == 17) /* UDP */
+    {
+        info->pkt_type = TCP4;
+        size_udp = 8;
+        udp = (struct sniff_udp*)(pkt + SIZE_ETHERNET + size_ip);
+        info->payload_len = ntohs(ip->ip_len) - size_ip - size_udp;
+        info->payload_offset = SIZE_ETHERNET + size_ip + size_udp;
+
+        orig_tuple->src_ipv4.s_addr = ip->ip_src.s_addr, orig_tuple->dst_ipv4.s_addr = ip->ip_dst.s_addr;
+        orig_tuple->src_port = ntohs(udp->uh_sport), orig_tuple->dst_port = ntohs(udp->uh_dport);
+
+        if(opts.debug && opts.verbose) {
+            fprintf(stderr, "udp-len:%hu:", size_udp);
+            fprintf(stderr, "data-start:%u:", info->payload_offset);
+            fprintf(stderr, "len:%u\n", info->payload_len);
+        }
+    }
+    else
+    {
+        fprintf(stderr, "not-tcp-or-udp\n");
         return;
     }
 
-    info->pkt_type = TCP4;
-    info->payload_len = ntohs(ip->ip_len) - size_ip - size_tcp;
-    info->payload_offset = SIZE_ETHERNET + size_ip + size_tcp;
-    info->tcp_flags = tcp->th_flags;
-
-    if(opts.debug && opts.verbose) {
-        fprintf(stderr, "tcp-len:%hu:", size_tcp);
-        fprintf(stderr, "offset:%u:", info->payload_offset);
-        fprintf(stderr, "payload:%u bytes\n", info->payload_len);
-    }
-
-    orig_tuple->src_ipv4.s_addr = ip->ip_src.s_addr, orig_tuple->dst_ipv4.s_addr = ip->ip_dst.s_addr;
     if(orig_tuple->src_ipv4.s_addr < orig_tuple->dst_ipv4.s_addr)
         sorted_tuple->src_ipv4.s_addr = orig_tuple->src_ipv4.s_addr, sorted_tuple->dst_ipv4.s_addr = orig_tuple->dst_ipv4.s_addr;
     else
         sorted_tuple->src_ipv4.s_addr = orig_tuple->dst_ipv4.s_addr, sorted_tuple->dst_ipv4.s_addr = orig_tuple->src_ipv4.s_addr;
 
-    orig_tuple->src_port = ntohs(tcp->th_sport), orig_tuple->dst_port = ntohs(tcp->th_dport);
     if(orig_tuple->src_port < orig_tuple->dst_port)
         sorted_tuple->src_port = orig_tuple->src_port, sorted_tuple->dst_port = orig_tuple->dst_port;
     else
@@ -375,26 +411,16 @@ void delete_map(struct hashmap* ipv4_hashmap, struct ipv4_conn* conn)
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
-void populate_ipv4_proxy(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, const u_char* packet, struct ipv4_info* info)
+void populate_tcp4_proxyv1(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, const u_char* packet, struct ipv4_info* info)
 {
     char proxy_str[NO_PAYLOAD_MAX_IPV4_PKT_SIZE];
     const u_char *payload = packet + info->payload_offset;
-    const char match_str[] = "PROXY TCP4 ";
     char *cursor;
     char *match;
     int len;
     char *src_ip, *dst_ip, *src_port, *dst_port;
     struct ipv4_tuple tuple;
-
-    if(info->payload_len >= NO_PAYLOAD_MAX_IPV4_PKT_SIZE || \
-       strncmp((const char *)packet + info->payload_offset, \
-               match_str, sizeof(match_str)-1) != 0)
-    {
-        if(opts.debug)
-            fprintf(stderr, "payload string not a match; setting to bypass\n");
-        conn->stream_flags |= MF_BYPASS;
-        return;
-    }
+    const char match_v1_str[] = "PROXY TCP4 ";
 
     memset(proxy_str, 0, NO_PAYLOAD_MAX_IPV4_PKT_SIZE);
     strncpy(proxy_str, (const char *)packet + info->payload_offset, info->payload_len);
@@ -403,8 +429,8 @@ void populate_ipv4_proxy(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, co
         fprintf(stderr, "parsing: %s", proxy_str);
 
     conn->ppv1_len = len;
-    cursor = proxy_str + sizeof(match_str)-1;
-    len = strnlen(cursor, NO_PAYLOAD_MAX_IPV4_PKT_SIZE - sizeof(match_str) - 1);
+    cursor = proxy_str + sizeof(match_v1_str)-1;
+    len = strnlen(cursor, NO_PAYLOAD_MAX_IPV4_PKT_SIZE - sizeof(match_v1_str) - 1);
     match = memchr(cursor, ' ', MIN(len, 16));
     if(match && *match == ' ') {
         *match = '\0';
@@ -456,6 +482,39 @@ void populate_ipv4_proxy(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, co
         fprintf(stderr, "proxy_tuple set to %x:%x:%hu:%hu\n", \
                 conn->proxy_tuple.src_ipv4.s_addr, conn->proxy_tuple.dst_ipv4.s_addr, \
                 conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
+    }
+}
+
+void populate_proxy(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, const u_char* packet, struct ipv4_info* info)
+{
+    const char match_v1_str[] = "PROXY TCP4 ";
+    const char match_v2_str[] = "\r\n\r\n\x00\r\nQUIT\n\x21\x11";
+
+    if(info->payload_len >= NO_PAYLOAD_MAX_IPV4_PKT_SIZE)
+    {
+        if(opts.debug)
+            fprintf(stderr, "payload string too long for protocol; setting to bypass\n");
+        conn->stream_flags |= MF_BYPASS;
+        return;
+    }
+
+    if(strncmp((const char *)packet + info->payload_offset, \
+               match_v2_str, sizeof(match_v2_str)-1) == 0)
+    {
+        if(opts.debug)
+            fprintf(stderr, "payload string is a v2 match! bypassing for now...\n");
+        conn->stream_flags |= MF_BYPASS;
+    }
+
+    else if(strncmp((const char *)packet + info->payload_offset, \
+               match_v1_str, sizeof(match_v1_str)-1) == 0)
+        populate_tcp4_proxyv1(conn, pheader, packet, info);
+
+    else
+    {
+        if(opts.debug)
+            fprintf(stderr, "payload string not a match; setting to bypass\n");
+        conn->stream_flags |= MF_BYPASS;
     }
 }
 
@@ -613,7 +672,7 @@ int main(int argc, char* argv[], char* env[])
                 {
                     if(ipv4_info.payload_len > 0)
                     {
-                        populate_ipv4_proxy(conn, pheader, packet, &ipv4_info);
+                        populate_proxy(conn, pheader, packet, &ipv4_info);
                         if(conn->proxy_tuple.dst_ipv4.s_addr > 0 || conn->stream_flags & MF_BYPASS)
                         {
                             write_tcp4_handshake(conn, dump_handle, inject_handle);
