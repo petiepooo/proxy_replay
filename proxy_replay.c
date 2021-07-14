@@ -386,18 +386,21 @@ void populate_ipv4_proxy(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, co
     char *src_ip, *dst_ip, *src_port, *dst_port;
     struct ipv4_tuple tuple;
 
-    strncpy(proxy_str, (const char *)packet + info->payload_offset, NO_PAYLOAD_MAX_IPV4_PKT_SIZE);
-    len = strnlen(proxy_str, NO_PAYLOAD_MAX_IPV4_PKT_SIZE - 1);
-
-    if(opts.debug && opts.verbose)
-        fprintf(stderr, "payload string: %s", proxy_str);
-    if(strncmp(proxy_str, match_str, sizeof(match_str)-1) != 0)
+    if(info->payload_len >= NO_PAYLOAD_MAX_IPV4_PKT_SIZE || \
+       strncmp((const char *)packet + info->payload_offset, \
+               match_str, sizeof(match_str)-1) != 0)
     {
         if(opts.debug)
             fprintf(stderr, "payload string not a match; setting to bypass\n");
         conn->stream_flags |= MF_BYPASS;
         return;
     }
+
+    memset(proxy_str, 0, NO_PAYLOAD_MAX_IPV4_PKT_SIZE);
+    strncpy(proxy_str, (const char *)packet + info->payload_offset, info->payload_len);
+    len = info->payload_len;
+    if(opts.debug)
+        fprintf(stderr, "parsing: %s", proxy_str);
 
     conn->ppv1_len = len;
     cursor = proxy_str + sizeof(match_str)-1;
@@ -432,7 +435,7 @@ void populate_ipv4_proxy(struct ipv4_conn* conn, struct pcap_pkthdr* pheader, co
     if(len != 1 || *(match+1) != '\n')
     {
         if(opts.debug)
-            fprintf(stderr, "payload string not formatted correctly; setting to bypass\n");
+            fprintf(stderr, "v1 payload string not formatted correctly; setting to bypass\n");
         conn->stream_flags |= MF_BYPASS;
         return;
     }
@@ -581,7 +584,12 @@ int main(int argc, char* argv[], char* env[])
                 {
                     conn = create_populate_map(ipv4_hashmap, &orig_tuple, &sorted_tuple);
                     if(opts.debug) {
-                        fprintf(stderr, "map: %p created\n", conn);
+                        fprintf(stderr, "map: %p created for tuple: %x:%x:%hu:%hu\n", \
+                                conn, \
+                                sorted_tuple.src_ipv4.s_addr, \
+                                sorted_tuple.dst_ipv4.s_addr, \
+                                sorted_tuple.src_port, \
+                                sorted_tuple.dst_port);
                     }
                     if(conn && ipv4_info.tcp_flags && (ipv4_info.tcp_flags & TH_SYN) == 0)
                     {
@@ -595,9 +603,11 @@ int main(int argc, char* argv[], char* env[])
             {
                 conn->last_seen = time(NULL);
                 if(conn->stream_flags & MF_DISCARD)
-                    continue;
+                {
+                    //donothing continue;
+                }
 
-                if(conn->proxy_tuple.dst_ipv4.s_addr == 0 && (conn->stream_flags & MF_BYPASS) == 0)
+                else if(conn->proxy_tuple.dst_ipv4.s_addr == 0 && (conn->stream_flags & MF_BYPASS) == 0)
                 {
                     if(ipv4_info.payload_len > 0)
                     {
@@ -626,8 +636,12 @@ int main(int argc, char* argv[], char* env[])
 
                 /* if is_tcp(packet) && RST in pkt.flags || map.flags.srcfin && map.flags.dstfin */
                 if(conn && ipv4_info.tcp_flags && ipv4_info.tcp_flags & TH_RST)
+                {
+                    if(opts.debug)
+                        fprintf(stderr, "map: %p deleted on RST\n", conn);
                     delete_map(ipv4_hashmap, conn);
-                if(conn && conn->stream_flags == (MF_SRCFIN | MF_DSTFIN) && ipv4_info.tcp_flags == TH_ACK)
+                }
+                else if(conn && conn->stream_flags == (MF_SRCFIN | MF_DSTFIN) && ipv4_info.tcp_flags == TH_ACK)
                 {
                     if(opts.debug)
                         fprintf(stderr, "map: %p deleted on final ACK\n", conn);
