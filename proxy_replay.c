@@ -125,7 +125,7 @@ struct options {
     /* bitfield for option flags */
     uint32_t debug : 1;
     uint32_t verbose : 1;
-    uint32_t no_warn : 1;
+    uint32_t warn : 1;
 };
 struct options opts;
 
@@ -168,7 +168,7 @@ void read_options(int argc, char* argv[])
     int len;
 
     // put ':' at the starting of the string so compiler can distinguish between '?' and ':'
-    while((opt = getopt(argc, argv, ":r:w:i:o:hdvn")) != -1)
+    while((opt = getopt(argc, argv, ":r:w:i:o:hdvW")) != -1)
     {
         switch(opt)
         {
@@ -205,8 +205,8 @@ void read_options(int argc, char* argv[])
             opts.verbose = 1;
             break;
 
-        case 'n':  /* no odd-packet warnings */
-            opts.no_warn = 1;
+        case 'W':  /* odd-packet warnings */
+            opts.warn = 1;
             break;
 
         case ':':  /* no value supplied */
@@ -594,7 +594,9 @@ int main(int argc, char* argv[], char* env[])
                     if(conn && ipv4_info.tcp_flags && (ipv4_info.tcp_flags & TH_SYN) == 0)
                     {
                         conn->stream_flags |= MF_DISCARD;
-                        fprintf(stderr, "partial 1\n");
+                        /* log(partial stream) */
+                        if(opts.warn)
+                            fprintf(stderr, "partial 1\n");
                     }
                 }
             }
@@ -626,6 +628,8 @@ int main(int argc, char* argv[], char* env[])
                         {
                             conn->stream_flags |= MF_DISCARD;
                             /* log(partial stream) */
+                            if(opts.warn)
+                                fprintf(stderr, "partial 2\n");
                         }
                         continue;
                     }
@@ -669,8 +673,10 @@ int main(int argc, char* argv[], char* env[])
         } 
 
         if(packet_count % 100 == 0)
+        {
             /* check another entry for expiry */
-            break; /* TODO: remove when done debugging */
+            //break; /* TODO: remove when done debugging */
+        }
     }
 
     if(opts.debug)
