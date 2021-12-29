@@ -703,9 +703,9 @@ int main(int argc, char* argv[], char* env[])
     }
 
     ipv4_hashmap = hashmap_new(sizeof(struct ipv4_conn), 512, 0, 0, 
-                               ipv4_conn_hash, ipv4_conn_compare, NULL);
+                               ipv4_conn_hash, ipv4_conn_compare, NULL, NULL);
     ipv6_hashmap = hashmap_new(sizeof(struct ipv6_conn), 512, 0, 0, 
-                               ipv6_conn_hash, ipv6_conn_compare, NULL);
+                               ipv6_conn_hash, ipv6_conn_compare, NULL, NULL);
 
     while((rc = pcap_next_ex(in_handle, &pheader, &packet)) == 1 || rc == 0)
     {
