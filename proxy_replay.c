@@ -389,7 +389,7 @@ void parse_pkt(const u_char* pkt, struct ipv4_tuple* orig_tuple, struct ipv4_tup
         info->payload_len = ntohs(ip->ip_len) - size_ip - size_udp;
         info->payload_offset = SIZE_ETHERNET + size_ip + size_udp;
 
-        orig_tuple->src_ipv4.s_addr = ip->ip_src.s_addr, orig_tuple->dst_ipv4.s_addr = ip->ip_dst.s_addr;
+        orig_tuple->src_ipv4.s_addr = ntohl(ip->ip_src.s_addr), orig_tuple->dst_ipv4.s_addr = ntohl(ip->ip_dst.s_addr);
         orig_tuple->src_port = ntohs(udp->uh_sport), orig_tuple->dst_port = ntohs(udp->uh_dport);
 
         if(opts.debug && opts.verbose) {
