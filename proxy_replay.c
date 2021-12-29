@@ -137,6 +137,11 @@ struct options opts;
 
 /*** hashmap helper funcs ***/
 
+uint64_t ipv4_conn_hash(const void *item, uint64_t seed0, uint64_t seed1) {
+    const struct ipv4_conn* conn = item;
+    return hashmap_sip(&conn->sorted_tuple, sizeof(struct ipv4_tuple), seed0, seed1);
+}
+
 int ipv4_conn_compare(const void *a, const void *b, void *udata) {
     const struct ipv4_conn *ua = a;
     const struct ipv4_conn *ub = b;
@@ -145,11 +150,6 @@ int ipv4_conn_compare(const void *a, const void *b, void *udata) {
         || (ub->sorted_tuple.src_port - ua->sorted_tuple.src_port)
         || (ub->sorted_tuple.dst_port - ua->sorted_tuple.dst_port)
         || 0;
-}
-
-uint64_t ipv4_conn_hash(const void *item, uint64_t seed0, uint64_t seed1) {
-    const struct ipv4_conn* conn = item;
-    return hashmap_sip(&conn->sorted_tuple, sizeof(struct ipv4_tuple), seed0, seed1);
 }
 
 bool ipv4_conn_iter(const void *item, void *udata) {
@@ -202,6 +202,7 @@ void read_options(int argc, char* argv[])
         case 'h':  /* display help */
             printf("proxy_replay: replays packets received with PROXY protocol as they would look before proxying\n");
             printf("usage: proxy_replay [-h] [-d] -i iface | -r pcap [ -o iface | -w pcap ]\n");
+            /* TODO: expanded verbiage on options and their use */
             exit(0);
 
         case 'd':  /* debug mode */
@@ -243,19 +244,21 @@ void read_options(int argc, char* argv[])
     else if(strlen(opts.read_file) > 0 && strlen(opts.read_iface) > 0)
     {
         fprintf(stderr, "Cannot read from both file and interface\n");
-        assert(0);
+        exit(-1);
     }
     if(strlen(opts.write_file) == 0 && strlen(opts.write_iface) == 0)
+    {
+        fprintf(stderr, "no output specified; debug mode enabled\n");
         opts.debug = 1;
+    }
     else if(strlen(opts.write_file) > 0 && strlen(opts.write_iface) > 0)
     {
         fprintf(stderr, "Cannot write to both file and interface\n");
-        assert(0);
+        exit(-1);
     }
 
     if(opts.debug)
     {
-        fprintf(stderr, "no output specified; debug mode enabled\n");
         if(opts.verbose)
         {
             if(strlen(opts.filter))
@@ -607,6 +610,8 @@ int main(int argc, char* argv[], char* env[])
 
     read_options(argc, argv);
 
+    /* TODO: create SIG_USR1 handler to dump hashmap to debug file */
+
     if(strlen(opts.read_iface) > 0)
         in_handle = pcap_open_live(opts.read_iface, 0, 1, 100, readerrbuf);
     else
@@ -624,6 +629,11 @@ int main(int argc, char* argv[], char* env[])
     if(strlen(opts.write_iface) > 0)
         inject_handle = pcap_open_live(opts.write_iface, 0, 1, 100, writeerrbuf);
 
+    if(strlen(opts.filter))
+    {
+        /* TODO: if filter provided, set pcap filter so nothing matches, drain buffer, then set to provided filter */
+    }
+
     ipv4_hashmap = hashmap_new(sizeof(struct ipv4_conn), 512, 0, 0, 
                                ipv4_conn_hash, ipv4_conn_compare, NULL);
 
@@ -633,6 +643,10 @@ int main(int argc, char* argv[], char* env[])
             continue;
         assert(rc);
         ++packet_count;
+
+        /* TODO: rework to determine IPv4 vs IPv6 vs non-IP, */
+        /* then TCP4, TCP6, UDP4, UDP6, or non supported */
+        /* makes future support say for SCTP easy to add */
 
         parse_pkt(packet, &orig_tuple, &sorted_tuple, &ipv4_info);
 	switch(ipv4_info.pkt_type)
