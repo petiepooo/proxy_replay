@@ -122,6 +122,20 @@ struct ipv4_conn {
     struct tcp4_pkt* ack_pkt;
 };
 
+struct ipv6_tuple {
+    struct in6_addr src_ipv6;
+    struct in6_addr dst_ipv6;
+    uint16_t src_port;
+    uint16_t dst_port;
+};
+
+struct ipv6_conn {
+    /* TODO: finish IPv6 structs */
+    struct ipv6_tuple sorted_tuple; /* must be first field in struct */
+    struct ipv6_tuple orig_tuple;
+    struct ipv6_tuple proxy_tuple;
+};
+
 struct options {
     char read_file[MAX_PATH_LEN];
     char write_file[MAX_PATH_LEN];
@@ -154,16 +168,53 @@ int ipv4_conn_compare(const void *a, const void *b, void *udata) {
 
 bool ipv4_conn_iter(const void *item, void *udata) {
     const struct ipv4_conn *conn = item;
-        fprintf(stderr, "conn: %p\n", conn);
-        fprintf(stderr, "\tsort_tuple: %08x:%08x:%hu:%hu\n", \
-                conn->sorted_tuple.src_ipv4.s_addr, conn->sorted_tuple.dst_ipv4.s_addr, \
-                conn->sorted_tuple.src_port, conn->sorted_tuple.dst_port);
-        fprintf(stderr, "\torig_tuple: %08x:%08x:%hu:%hu\n", \
-                conn->orig_tuple.src_ipv4.s_addr, conn->orig_tuple.dst_ipv4.s_addr, \
-                conn->orig_tuple.src_port, conn->orig_tuple.dst_port);
-        fprintf(stderr, "\tproxy_tuple: %08x:%08x:%hu:%hu\n", \
-                conn->proxy_tuple.src_ipv4.s_addr, conn->proxy_tuple.dst_ipv4.s_addr, \
-                conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
+    fprintf(stderr, "conn: %p\n", conn);
+    fprintf(stderr, "\tsort_tuple: %08x:%08x:%hu:%hu\n", \
+            conn->sorted_tuple.src_ipv4.s_addr, conn->sorted_tuple.dst_ipv4.s_addr, \
+            conn->sorted_tuple.src_port, conn->sorted_tuple.dst_port);
+    fprintf(stderr, "\torig_tuple: %08x:%08x:%hu:%hu\n", \
+            conn->orig_tuple.src_ipv4.s_addr, conn->orig_tuple.dst_ipv4.s_addr, \
+            conn->orig_tuple.src_port, conn->orig_tuple.dst_port);
+    fprintf(stderr, "\tproxy_tuple: %08x:%08x:%hu:%hu\n", \
+            conn->proxy_tuple.src_ipv4.s_addr, conn->proxy_tuple.dst_ipv4.s_addr, \
+            conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
+    /* TODO: also display created, last_seen, and stream_flags */
+    return true;
+}
+
+uint64_t ipv6_conn_hash(const void *item, uint64_t seed0, uint64_t seed1) {
+    const struct ipv6_conn* conn = item;
+    return hashmap_sip(&conn->sorted_tuple, sizeof(struct ipv6_tuple), seed0, seed1);
+}
+
+int ipv6_conn_compare(const void *a, const void *b, void *udata) {
+    const struct ipv6_conn *ua = a;
+    const struct ipv6_conn *ub = b;
+    return memcmp(ub->sorted_tuple.src_ipv6.s6_addr, ua->sorted_tuple.src_ipv6.s6_addr, sizeof(struct in6_addr))
+        || memcmp(ub->sorted_tuple.dst_ipv6.s6_addr, ua->sorted_tuple.dst_ipv6.s6_addr, sizeof(struct in6_addr))
+        || (ub->sorted_tuple.src_port - ua->sorted_tuple.src_port)
+        || (ub->sorted_tuple.dst_port - ua->sorted_tuple.dst_port)
+        || 0;
+}
+
+bool ipv6_conn_iter(const void *item, void *udata) {
+    const struct ipv6_conn *conn = item;
+    char src[50];
+    char dst[50];
+    fprintf(stderr, "conn: %p\n", conn);
+    inet_ntop(AF_INET6, &conn->sorted_tuple.src_ipv6, src, 50);
+    inet_ntop(AF_INET6, &conn->sorted_tuple.dst_ipv6, dst, 50);
+    fprintf(stderr, "\tsort_tuple: %s:%s:%hu:%hu\n", \
+            src, dst, conn->sorted_tuple.src_port, conn->sorted_tuple.dst_port);
+    inet_ntop(AF_INET6, &conn->orig_tuple.src_ipv6, src, 50);
+    inet_ntop(AF_INET6, &conn->orig_tuple.dst_ipv6, dst, 50);
+    fprintf(stderr, "\torig_tuple: %s:%s:%hu:%hu\n", \
+            src, dst, conn->orig_tuple.src_port, conn->orig_tuple.dst_port);
+    inet_ntop(AF_INET6, &conn->proxy_tuple.src_ipv6, src, 50);
+    inet_ntop(AF_INET6, &conn->proxy_tuple.dst_ipv6, dst, 50);
+    fprintf(stderr, "\tproxy_tuple: %s:%s:%hu:%hu\n", \
+            src, dst, conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
+    /* TODO: also display created, last_seen, and stream_flags */
     return true;
 }
 
@@ -607,6 +658,7 @@ int main(int argc, char* argv[], char* env[])
     struct ipv4_info ipv4_info;
     struct ipv4_conn* conn;
     struct hashmap *ipv4_hashmap;
+    struct hashmap *ipv6_hashmap;
 
     read_options(argc, argv);
 
@@ -636,6 +688,8 @@ int main(int argc, char* argv[], char* env[])
 
     ipv4_hashmap = hashmap_new(sizeof(struct ipv4_conn), 512, 0, 0, 
                                ipv4_conn_hash, ipv4_conn_compare, NULL);
+    ipv6_hashmap = hashmap_new(sizeof(struct ipv6_conn), 512, 0, 0, 
+                               ipv6_conn_hash, ipv6_conn_compare, NULL);
 
     while((rc = pcap_next_ex(in_handle, &pheader, &packet)) == 1 || rc == 0)
     {
@@ -769,6 +823,7 @@ int main(int argc, char* argv[], char* env[])
     if(opts.debug && opts.verbose)
     {
         hashmap_scan(ipv4_hashmap, ipv4_conn_iter, NULL);
+        hashmap_scan(ipv6_hashmap, ipv6_conn_iter, NULL);
     }
 
     pcap_close(in_handle);
@@ -777,6 +832,7 @@ int main(int argc, char* argv[], char* env[])
     if(dump_handle)
         pcap_dump_close(dump_handle);
     hashmap_free(ipv4_hashmap);
+    hashmap_free(ipv6_hashmap);
 
     return 0;
 }
