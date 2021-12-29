@@ -160,8 +160,8 @@ int ipv4_conn_compare(const void *a, const void *b, void *udata) {
     const struct ipv4_conn *ua = a;
     const struct ipv4_conn *ub = b;
     return (ub->sorted_tuple.src_ipv4.s_addr - ua->sorted_tuple.src_ipv4.s_addr)
-        || (ub->sorted_tuple.dst_ipv4.s_addr - ua->sorted_tuple.dst_ipv4.s_addr)
         || (ub->sorted_tuple.src_port - ua->sorted_tuple.src_port)
+        || (ub->sorted_tuple.dst_ipv4.s_addr - ua->sorted_tuple.dst_ipv4.s_addr)
         || (ub->sorted_tuple.dst_port - ua->sorted_tuple.dst_port)
         || 0;
 }
@@ -191,8 +191,8 @@ int ipv6_conn_compare(const void *a, const void *b, void *udata) {
     const struct ipv6_conn *ua = a;
     const struct ipv6_conn *ub = b;
     return memcmp(ub->sorted_tuple.src_ipv6.s6_addr, ua->sorted_tuple.src_ipv6.s6_addr, sizeof(struct in6_addr))
-        || memcmp(ub->sorted_tuple.dst_ipv6.s6_addr, ua->sorted_tuple.dst_ipv6.s6_addr, sizeof(struct in6_addr))
         || (ub->sorted_tuple.src_port - ua->sorted_tuple.src_port)
+        || memcmp(ub->sorted_tuple.dst_ipv6.s6_addr, ua->sorted_tuple.dst_ipv6.s6_addr, sizeof(struct in6_addr))
         || (ub->sorted_tuple.dst_port - ua->sorted_tuple.dst_port)
         || 0;
 }
