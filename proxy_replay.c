@@ -134,6 +134,9 @@ struct ipv6_conn {
     struct ipv6_tuple sorted_tuple; /* must be first field in struct */
     struct ipv6_tuple orig_tuple;
     struct ipv6_tuple proxy_tuple;
+    time_t created;
+    time_t last_seen;
+    uint32_t stream_flags;
 };
 
 struct options {
@@ -168,17 +171,23 @@ int ipv4_conn_compare(const void *a, const void *b, void *udata) {
 
 bool ipv4_conn_iter(const void *item, void *udata) {
     const struct ipv4_conn *conn = item;
-    fprintf(stderr, "conn: %p\n", conn);
-    fprintf(stderr, "\tsort_tuple: %08x:%08x:%hu:%hu\n", \
+    fprintf(stderr, "\tconn: %p\n", conn);
+    fprintf(stderr, "\t\tsort_tuple: %08x:%08x:%hu:%hu\n", \
             conn->sorted_tuple.src_ipv4.s_addr, conn->sorted_tuple.dst_ipv4.s_addr, \
             conn->sorted_tuple.src_port, conn->sorted_tuple.dst_port);
-    fprintf(stderr, "\torig_tuple: %08x:%08x:%hu:%hu\n", \
+    fprintf(stderr, "\t\torig_tuple: %08x:%08x:%hu:%hu\n", \
             conn->orig_tuple.src_ipv4.s_addr, conn->orig_tuple.dst_ipv4.s_addr, \
             conn->orig_tuple.src_port, conn->orig_tuple.dst_port);
-    fprintf(stderr, "\tproxy_tuple: %08x:%08x:%hu:%hu\n", \
+    fprintf(stderr, "\t\tproxy_tuple: %08x:%08x:%hu:%hu\n", \
             conn->proxy_tuple.src_ipv4.s_addr, conn->proxy_tuple.dst_ipv4.s_addr, \
             conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
-    /* TODO: also display created, last_seen, and stream_flags */
+    fprintf(stderr, "\t\tcreated: %ld, last_seen: %ld, duration: %ld, age: %ld\n", \
+            conn->created, conn->last_seen, conn->last_seen - conn->created, time(NULL) - conn->created);
+    fprintf(stderr, "\t\tstream_flags:%s%s%s%s\n", \
+            conn->stream_flags & MF_DISCARD ? " MF_DISCARD" : "", \
+            conn->stream_flags & MF_BYPASS ? " MF_BYPASS" : "", \
+            conn->stream_flags & MF_SRCFIN ? " MF_SRCFIN" : "", \
+            conn->stream_flags & MF_DSTFIN ? " MF_DSTFIN" : "");
     return true;
 }
 
@@ -215,6 +224,13 @@ bool ipv6_conn_iter(const void *item, void *udata) {
     fprintf(stderr, "\tproxy_tuple: %s:%s:%hu:%hu\n", \
             src, dst, conn->proxy_tuple.src_port, conn->proxy_tuple.dst_port);
     /* TODO: also display created, last_seen, and stream_flags */
+    fprintf(stderr, "\t\tcreated: %ld, last_seen: %ld, duration: %ld, age: %ld\n", \
+            conn->created, conn->last_seen, conn->last_seen - conn->created, time(NULL) - conn->created);
+    fprintf(stderr, "\t\tstream_flags:%s%s%s%s\n", \
+            conn->stream_flags & MF_DISCARD ? " MF_DISCARD" : "", \
+            conn->stream_flags & MF_BYPASS ? " MF_BYPASS" : "", \
+            conn->stream_flags & MF_SRCFIN ? " MF_SRCFIN" : "", \
+            conn->stream_flags & MF_DSTFIN ? " MF_DSTFIN" : "");
     return true;
 }
 
@@ -820,10 +836,20 @@ int main(int argc, char* argv[], char* env[])
 
     if(opts.debug)
         fprintf(stderr, "total packets handled: %llu\n", packet_count);
-    if(opts.debug && opts.verbose)
+    if(opts.debug)
     {
-        hashmap_scan(ipv4_hashmap, ipv4_conn_iter, NULL);
-        hashmap_scan(ipv6_hashmap, ipv6_conn_iter, NULL);
+        if (hashmap_count(ipv4_hashmap) > 0)
+        {
+            fprintf(stderr, "ipv4_hashmap has %ld maps on exit\n", hashmap_count(ipv4_hashmap));
+            if (opts.verbose)
+                hashmap_scan(ipv4_hashmap, ipv4_conn_iter, NULL);
+        }
+        if (hashmap_count(ipv6_hashmap) > 0)
+        {
+            fprintf(stderr, "ipv6_hashmap has %ld maps on exit\n", hashmap_count(ipv6_hashmap));
+            if (opts.verbose)
+                hashmap_scan(ipv6_hashmap, ipv6_conn_iter, NULL);
+        }
     }
 
     pcap_close(in_handle);
